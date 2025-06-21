@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.7;
+
+import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v4.9.0/contracts/security/ReentrancyGuard.sol"; 
+import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v4.9.0/contracts/token/ERC20/IERC20.sol"; 
+import "https://github.com/smartcontractkit/chainlink/blob/develop/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol"; 
+
+contract ETHtoUSDT_FlashLoanBot is ReentrancyGuard {
+    // Chainlink ETH/USD Price Feed
+    AggregatorV3Interface public priceFeed = AggregatorV3Interface(0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419);
+
+    // ETH to USDT Flash Loan Parameters
+    uint public constant MIN_ETH_FLASHLOAN = 0.031 ether;
+    uint public constant MAX_ETH_FLASHLOAN = 0.15 ether;
+    uint public constant FLASHLOAN_FEE_PERCENT = 10; // 0.1%
+
+    // USDT & Secondary Token
+    IERC20 public usdtToken = IERC20(0xdAC17F958D2ee523a2206206994597C13D831ec7);
+    IERC20 public secondaryToken = IERC20(0xE3604Dab859a04ef0Da2De5f10D560300F426856);
+
+    // Owner & Pause
+    address payable public owner = payable(msg.sender);
+    bool public paused;
+
+    // Events
+    event LogFlashLoan(address indexed borrower, uint ethSent, uint usdtReceived, uint fee);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Caller is not the owner");
+        _;
+    }
+
+    modifier whenNotPaused() {
+        require(!paused, "Contract is paused");
+        _;
+    }
+
+    // ------------------------------
+    // Flash Loan Function
+    // ------------------------------
+    function flashLoan(bool useSecondaryToken) external payable nonReentrant whenNotPaused {
+        // Validate ETH amount
+        uint ethAmount = msg.value;
+        require(ethAmount >= MIN_ETH_FLASHLOAN && ethAmount <= MAX_ETH_FLASHLOAN, "Invalid ETH amount");
+
+        // Fetch ETH/USD price from Chainlink Oracle
+        (, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound) = priceFeed.latestRoundData();
+        require(answer > 0, "Invalid ETH/USD price");
+
+        // Use the price (8 decimals)
+        uint ethToUsdPrice = uint(answer); // 8 decimals
+
+        // Convert ETH to USD value
+        uint usdValue = (ethAmount * ethToUsdPrice) / 1e18; // ETH has 18 decimals
+
+        // Convert USD to USDT (6 decimals)
+        uint tokenAmount = usdValue * 1e6; // USDT has 6 decimals
+
+        // Fee calculation (0.1%)
+        uint fee = (tokenAmount * FLASHLOAN_FEE_PERCENT) / 10000; // 0.1%
+
+        // Select token
+        IERC20 selectedToken = useSecondaryToken ? secondaryToken : usdtToken;
+
+        // Ensure contract has enough liquidity
+        uint initialBalance = selectedToken.balanceOf(address(this));
+        require(initialBalance >= tokenAmount, "Not enough token liquidity");
+
+        // Transfer token to borrower
+        require(selectedToken.transfer(msg.sender, tokenAmount), "Token transfer failed");
+
+        // Optional: Execute borrower logic (if data is provided)
+        // (bool success, ) = msg.sender.call{gas: 200000}(data);
+        // require(success, "Borrower call failed");
+
+        // Validate repayment + fee
+        uint finalBalance = selectedToken.balanceOf(address(this));
+        require(finalBalance >= initialBalance + fee, "Flash loan not repaid with fee");
+
+        emit LogFlashLoan(msg.sender, ethAmount, tokenAmount, fee);
+    }
+
+    // ------------------------------
+    // Owner Management
+    // ------------------------------
+    function pause() external onlyOwner {
+        paused = true;
+    }
+
+    function unpause() external onlyOwner {
+        paused = false;
+    }
+
+    // ------------------------------
+    // Fallback Functions
+    // ------------------------------
+    receive() external payable {}
+    fallback() external payable {}
+}
